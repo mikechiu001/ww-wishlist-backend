@@ -1,92 +1,114 @@
-import express from "express";
+'use strict';
+
+const express = require('express');
+const cors = require('cors');
 
 const app = express();
 
 /**
- * Parse JSON body
+ * CORS: allow Shopify storefront + dev tools to call this API.
+ * For now, allow all origins to keep POC simple/stable.
+ * (Later we can lock it down to your domain.)
  */
-app.use(express.json({ limit: "1mb" }));
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
 
 /**
- * CORS: allow Shopify storefront to call this backend
- * (We can lock this down later.)
+ * In-memory store (POC)
+ * Shape:
+ *   wishlistStore[list_id] = [ {handle, variant_id, title, url, image, price, ...}, ... ]
  */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
+const wishlistStore = Object.create(null);
 
 /**
- * In-memory wishlist store (POC)
- * key: list_id
- * val: array of product gids (strings)
+ * Helpers
  */
-const WISHLISTS = new Map();
+function toCleanString(v) {
+  return String(v || '').trim();
+}
 
 /**
- * Health check (JSON)
+ * Health check
  */
-app.get("/api/health", (req, res) => {
-  res.status(200).json({
+app.get('/api/health', (req, res) => {
+  return res.json({
     ok: true,
-    service: "ww-wishlist-backend",
+    service: 'ww-wishlist-backend',
     timestamp: new Date().toISOString(),
   });
 });
 
 /**
- * Root
- */
-app.get("/", (req, res) => {
-  res.send("WW Wishlist Backend is running.");
-});
-
-/**
- * Save wishlist
+ * Save wishlist items (overwrite strategy)
  * POST /api/wishlist/save
- * Body: { list_id: "abc", items: ["gid://shopify/Product/123", ...] }
+ * Body: { list_id: "xxx", items: [ {...}, {...} ] }
  */
-app.post("/api/wishlist/save", (req, res) => {
-  const body = req.body || {};
-  const list_id = String(body.list_id || "").trim();
-  const items = Array.isArray(body.items) ? body.items : [];
+app.post('/api/wishlist/save', (req, res) => {
+  try {
+    const body = req.body || {};
+    const list_id = toCleanString(body.list_id);
 
-  if (!list_id) {
-    return res.status(400).json({ ok: false, error: "Missing list_id" });
+    if (!list_id) {
+      return res.status(400).json({ ok: false, error: 'list_id_required' });
+    }
+
+    const items = Array.isArray(body.items) ? body.items : [];
+
+    // IMPORTANT: store objects as-is (do NOT stringify)
+    wishlistStore[list_id] = items;
+
+    return res.json({ ok: true, list_id, count: items.length });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'save_failed' });
   }
-
-  // sanitize + unique
-  const out = [];
-  const seen = new Set();
-  for (const it of items) {
-    const s = String(it || "").trim();
-    if (!s) continue;
-    if (seen.has(s)) continue;
-    seen.add(s);
-    out.push(s);
-  }
-
-  WISHLISTS.set(list_id, out);
-  return res.json({ ok: true, list_id, count: out.length });
 });
 
 /**
- * Get wishlist
- * GET /api/wishlist/get?list_id=abc
+ * Get wishlist items
+ * GET /api/wishlist/get?list_id=xxx
  */
-app.get("/api/wishlist/get", (req, res) => {
-  const list_id = String(req.query.list_id || "").trim();
-  if (!list_id) {
-    return res.status(400).json({ ok: false, error: "Missing list_id" });
+app.get('/api/wishlist/get', (req, res) => {
+  try {
+    const list_id = toCleanString(req.query.list_id);
+
+    if (!list_id) {
+      return res.status(400).json({ ok: false, error: 'list_id_required' });
+    }
+
+    const items = Array.isArray(wishlistStore[list_id]) ? wishlistStore[list_id] : [];
+
+    return res.json({ ok: true, list_id, items });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'get_failed' });
   }
-  const items = WISHLISTS.get(list_id) || [];
-  return res.json({ ok: true, list_id, items });
 });
 
+/**
+ * Optional: clear a list (useful for testing)
+ * POST /api/wishlist/clear
+ * Body: { list_id: "xxx" }
+ */
+app.post('/api/wishlist/clear', (req, res) => {
+  try {
+    const body = req.body || {};
+    const list_id = toCleanString(body.list_id);
+
+    if (!list_id) {
+      return res.status(400).json({ ok: false, error: 'list_id_required' });
+    }
+
+    delete wishlistStore[list_id];
+    return res.json({ ok: true, list_id, count: 0 });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'clear_failed' });
+  }
+});
+
+/**
+ * Start server
+ */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  // eslint-disable-next-line no-console
+  console.log(`WW Wishlist Backend listening on port ${PORT}`);
 });
